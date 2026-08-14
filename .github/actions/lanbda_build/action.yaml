@@ -1,0 +1,102 @@
+name: 'Terraform custom github actions'
+description: 'Custom composite action for lambda build'
+inputs:
+  aws-role:  # id of input
+    description: 'Role to be used'
+    required: true
+  service_name:  # id of input
+    description: 'whichever servoce to deploy'
+    required: true
+  service_deploy:  # id of input
+    description: 'which service to deploy'
+    required: true
+  environment_stage:
+    description: 'which service to deploy'
+    required: true
+  environment_stage_v2:
+    description: 'which service to deploy'
+    required: true    
+  state_bucket:
+    description: 'which bucket for terraform state'
+    required: false 
+  priceValidator_arn:
+    description: 'validator arn'
+    required: false
+  priceUpdater_arn:
+    description: 'updater arn'
+    required: false          
+  runner_token:  # id of input
+    description: 'token to be used'
+    required: true
+  terraform_version:  # id of input
+    description: 'Terraform version to be used'
+    default: "1.11.3"  
+runs:
+  using: "composite"
+  steps:
+    - name: configure aws credentials
+      uses: aws-actions/configure-aws-credentials@v3
+      with:
+        role-to-assume: ${{ inputs.aws-role }}
+        role-session-name: TerraformDeploySession
+        aws-region: "eu-west-1"  
+    - name: Set env vars from vars context JSON
+      run: |
+        # Pipe the JSON string into jq
+        echo "$VARS_CONTEXT" | 
+        # Convert JSON object into an array of key-value pairs
+        jq -r 'to_entries | 
+        # Map over each key-value pair
+        .[] | 
+        # Format each pair as "KEY=VALUE" and append it all to the environment file
+        "\(.key)=\(.value)"' >> $GITHUB_ENV
+      shell: bash           
+    - name: Set env vars from vars context JSON
+      run: |
+        # Pipe the JSON string into jq
+        echo "$SECRETS_CONTEXT" | 
+        # Convert JSON object into an array of key-value pairs
+        jq -r 'to_entries | 
+        # Map over each key-value pair
+        .[] | 
+        # Format each pair as "KEY=VALUE" and append it all to the environment file
+        "\(.key)=\(.value)"' >> $GITHUB_ENV
+      shell: bash                         
+    - name:  Env preparation ${{ inputs.service_name }}.
+      run: |
+            cd ${{ inputs.service_deploy }}/
+            sed -i "s|%environment_stage%|${{ inputs.environment_stage }}|g" *.tf
+            sed -i "s|%environment_stage_v2%|${{ inputs.environment_stage_v2 }}|g" *.tf
+            sed -i "s|%state_bucket%|${{ inputs.state_bucket }}|g" *.tf
+            env
+            envsubst < main.tf > main.tf.tmp && mv main.tf.tmp main.tf
+            if [[ ${{ inputs.service_deploy }} == "AWS/VPC" ]] || [[ ${{ inputs.service_deploy }} == "AWS/IAM_role" ]]; then
+             env
+             envsubst < main.tf > main.tf.tmp && mv main.tf.tmp main.tf
+             cat main.tf
+             echo "test"
+            cd ..
+            else
+            echo "else test"
+            cd ..
+            fi          
+      shell: bash                
+    # - name: Build ${{ inputs.service_name }}
+    #   if:  github.event.inputs.service_deploy != 'infrastructure' && !contains(github.event.inputs.service_deploy, 'stepFunction')
+    #   run: | 
+    #         sudo apt-get update -y
+    #         sudo apt install zip -y 
+    #         cd ${{ inputs.service_deploy }}/src
+    #         npm install -D @types/aws-lambda esbuild
+    #         npm install
+    #         npm run build
+    #         mkdir ${{ inputs.service_name }}Layer
+    #         cp -r node_modules ${{ inputs.service_name }}Layer/
+    #         zip -r ${{ inputs.service_name }}Layer.zip ${{ inputs.service_name }}Layer
+    #         LAYER_ARN=$(aws lambda publish-layer-version --layer-name ${{ inputs.service_name }}Layer --zip-file fileb://${{ inputs.service_name }}Layer.zip --compatible-runtimes nodejs22.x  --compatible-architectures "x86_64" --region eu-west-1 | jq -r '.LayerVersionArn')
+    #         mv node_modules dist/
+    #         cd ..
+    #         sed -i "s|%lambdafunction_layer%|$LAYER_ARN|g" main.tf
+    #         sed -i "s|%environment_stage%|${{ inputs.environment_stage }}|g" main.tf
+    #         cd ..
+    #   shell: bash               
