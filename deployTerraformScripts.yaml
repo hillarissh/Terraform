@@ -1,0 +1,257 @@
+name: 'deployTerraformScripts'
+run-name: 'Deployment for ${{ github.event.inputs.service_deploy }}'
+on:
+  workflow_dispatch:
+    inputs:
+      service_deploy:
+        type: choice
+        description: "Which Terraform script to run"
+        default: "IAM_policies"
+        options: 
+        - "AWS/IAM_policies"
+        - "AWS/IAM_role"
+        - "AWS/VPC"
+        - "AWS/WAF"
+permissions:
+  id-token: write   # This is required for requesting the JWT
+  contents: write    # This is required for actions/checkout  
+  actions     : write
+  deployments : write  
+jobs:
+########################################
+################DEV#####################
+########################################        
+  dev-plan:
+    name: 'Terraform Plan for ${{ github.event.inputs.service_deploy }}'
+    runs-on: ['ubuntu-latest']
+    if: github.ref != 'refs/heads/qa' && github.ref != 'refs/heads/master' && !contains(github.ref,'release/')  
+    environment:
+      name: dev
+    env:
+      VARS_CONTEXT: ${{ toJson(vars) }}    
+      SECRETS_CONTEXT: ${{ toJson(secrets) }}          
+    steps:
+      - name: Git clone the repository
+        uses: actions/checkout@v4
+      - name: Setup Node.js environment
+        uses: actions/setup-node@v3.9.1
+        with:
+          node-version: '22'
+      - name: Set env vars from vars context JSON
+        run: |
+          # Pipe the JSON string into jq
+          echo "$VARS_CONTEXT" | 
+          # Convert JSON object into an array of key-value pairs
+          jq -r 'to_entries | 
+          # Map over each key-value pair
+          .[] | 
+          # Format each pair as "KEY=VALUE" and append it all to the environment file
+          "\(.key)=\(.value)"' >> $GITHUB_ENV      
+      - name: Set env vars from vars context JSON
+        run: |
+          # Pipe the JSON string into jq
+          echo "$SECRETS_CONTEXT" | 
+          # Convert JSON object into an array of key-value pairs
+          jq -r 'to_entries | 
+          # Map over each key-value pair
+          .[] | 
+          # Format each pair as "KEY=VALUE" and append it all to the environment file
+          "\(.key)=\(.value)"' >> $GITHUB_ENV          
+###################################################
+########## INFRASTRUCTURE #########################
+###################################################
+      - name: Prepare environment .  
+        uses: ./.github/actions/lambda_build
+        with:
+          aws-role: ${{ secrets.OIDC_PLATFORM_NONPROD }}
+          service_name: ${{ github.event.inputs.service_deploy }}
+          service_deploy: ${{ github.event.inputs.service_deploy }}
+          environment_stage: ${{ vars.environment_stage }}
+          environment_stage_v2: ${{ vars.environment_stage_v2 }}
+          state_bucket: ${{ vars.state_bucket }}
+          runner_token: ${{ secrets.RUNNER_TOKEN }}
+          terraform_version: "1.11.4"       
+###################################################          
+########## TERRAFORM PLAN #########################
+###################################################                                 
+    
+      - name: Terraform plan ${{ github.event.inputs.service_deploy }}.
+        if: contains(github.event.inputs.service_deploy,'AWS')
+        uses: ./.github/actions/terraform_custom
+        with:
+          aws-role: ${{ secrets.OIDC_PLATFORM_NONPROD }}
+          deploy-plan: "plan -out AWS-${{ github.run_number }}.plan"
+          service_deploy: ${{ github.event.inputs.service_deploy }}
+          runner_token: ${{ secrets.RUNNER_TOKEN }}
+          terraform_version: "1.13.4"         
+
+###################################################          
+########## UPLOAD OUTPUTS #########################
+###################################################           
+      - name: Uploading terraform plan output
+        if: contains(github.event.inputs.service_deploy,'AWS')
+        uses: actions/upload-artifact@v4.4.3
+        with:
+          name: Terraform-Plan-AWS-${{ github.run_number }}-${{ vars.environment_stage }}
+          path: ${{ github.event.inputs.service_deploy }}/AWS-${{ github.run_number }}.plan
+
+      - name: Uploading Main.tf
+        uses: actions/upload-artifact@v4.4.3
+        with:
+          name: Terraform-main-${{ github.run_number }}-${{ vars.environment_stage }}          
+          path: ${{ github.event.inputs.service_deploy }}/*.tf                                  
+###################################################          
+########## END PLAN ###############################
+###################################################  
+  dev-apply:
+    name: 'Apply Terraform Changes for ${{ github.event.inputs.service_deploy }}'
+    runs-on: ['ubuntu-latest']
+    needs: ['dev-plan']
+    environment:
+      name: dev-apply
+    steps:
+      - name: Git clone the repository
+        uses: actions/checkout@v4
+###################################################          
+########## DOWNLOAD OUTPUTS #######################
+###################################################         
+      - uses: actions/download-artifact@v4
+        with:
+          name: Terraform-main-${{ github.run_number }}-${{ vars.environment_stage }}
+          path: ${{ github.event.inputs.service_deploy }}                 
+      - uses: actions/download-artifact@v4
+        if: contains(github.event.inputs.service_deploy,'AWS')
+        with:
+          name: Terraform-Plan-AWS-${{ github.run_number }}-${{ vars.environment_stage }}  
+          path: ${{ github.event.inputs.service_deploy }}                                 
+###################################################          
+########## TERRAFORM APPLY ########################
+###################################################                         
+      - name: Terraform Apply ${{ github.event.inputs.service_deploy }}.
+        if: contains(github.event.inputs.service_deploy,'AWS')
+        uses: ./.github/actions/terraform_custom
+        with:
+          aws-role: ${{ secrets.OIDC_PLATFORM_NONPROD }}
+          deploy-plan: "apply -auto-approve AWS-${{ github.run_number }}.plan"
+          service_deploy: ${{ github.event.inputs.service_deploy }}
+          runner_token: ${{ secrets.RUNNER_TOKEN }}
+          terraform_version: "1.13.4"
+
+# ########################################
+# ################QA######################
+# ########################################
+  qa-plan:
+    name: 'Terraform Plan for ${{ github.event.inputs.service_deploy }}'
+    runs-on: ['ubuntu-latest']
+    if: ${{ github.ref_name == 'qa' }}
+    environment:
+      name: qa
+    env:
+      VARS_CONTEXT: ${{ toJson(vars) }}
+      SECRETS_CONTEXT: ${{ toJson(secrets) }}
+    steps:
+      - name: Git clone the repository
+        uses: actions/checkout@v4
+      - name: Setup Node.js environment
+        uses: actions/setup-node@v3.9.1
+        with:
+          node-version: '22'
+      - name: Set env vars from vars context JSON
+        run: |
+          # Pipe the JSON string into jq
+          echo "$VARS_CONTEXT" |
+          # Convert JSON object into an array of key-value pairs
+          jq -r 'to_entries |
+          # Map over each key-value pair
+          .[] |
+          # Format each pair as "KEY=VALUE" and append it all to the environment file
+          "\(.key)=\(.value)"' >> $GITHUB_ENV
+      - name: Set env vars from vars context JSON
+        run: |
+          # Pipe the JSON string into jq
+          echo "$SECRETS_CONTEXT" |
+          # Convert JSON object into an array of key-value pairs
+          jq -r 'to_entries |
+          # Map over each key-value pair
+          .[] |
+          # Format each pair as "KEY=VALUE" and append it all to the environment file
+          "\(.key)=\(.value)"' >> $GITHUB_ENV
+###################################################
+########## INFRASTRUCTURE #########################
+###################################################
+      - name: Prepare environment .
+        uses: ./.github/actions/lambda_build
+        with:
+          aws-role: ${{ secrets.OIDC_PLATFORM_NONPROD }}
+          service_name: ${{ github.event.inputs.service_deploy }}
+          service_deploy: ${{ github.event.inputs.service_deploy }}
+          environment_stage: ${{ vars.environment_stage }}
+          environment_stage_v2: ${{ vars.environment_stage_v2 }}
+          state_bucket: ${{ vars.state_bucket }}
+          runner_token: ${{ secrets.RUNNER_TOKEN }}
+          terraform_version: "1.11.4"
+###################################################
+########## TERRAFORM PLAN #########################
+###################################################
+
+      - name: Terraform plan ${{ github.event.inputs.service_deploy }}.
+        if: contains(github.event.inputs.service_deploy,'AWS')
+        uses: ./.github/actions/terraform_custom
+        with:
+          aws-role: ${{ secrets.OIDC_PLATFORM_NONPROD }}
+          deploy-plan: "plan -out AWS-${{ github.run_number }}.plan"
+          service_deploy: ${{ github.event.inputs.service_deploy }}
+          runner_token: ${{ secrets.RUNNER_TOKEN }}
+          terraform_version: "1.13.4"
+
+###################################################
+########## UPLOAD OUTPUTS #########################
+###################################################
+      - name: Uploading terraform plan output
+        if: contains(github.event.inputs.service_deploy,'AWS')
+        uses: actions/upload-artifact@v4.4.3
+        with:
+          name: Terraform-Plan-AWS-${{ github.run_number }}-${{ vars.environment_stage }}
+          path: ${{ github.event.inputs.service_deploy }}/AWS-${{ github.run_number }}.plan
+
+      - name: Uploading Main.tf
+        uses: actions/upload-artifact@v4.4.3
+        with:
+          name: Terraform-main-${{ github.run_number }}-${{ vars.environment_stage }}
+          path: ${{ github.event.inputs.service_deploy }}/*.tf
+###################################################
+########## END PLAN ###############################
+###################################################
+  qa-apply:
+    name: 'Apply Terraform Changes for ${{ github.event.inputs.service_deploy }}'
+    runs-on: ['ubuntu-latest']
+    needs: ['qa-plan']
+    environment:
+      name: qa-apply
+    steps:
+      - name: Git clone the repository
+        uses: actions/checkout@v4
+###################################################
+########## DOWNLOAD OUTPUTS #######################
+###################################################
+      - uses: actions/download-artifact@v4
+        with:
+          name: Terraform-main-${{ github.run_number }}-${{ vars.environment_stage }}
+          path: ${{ github.event.inputs.service_deploy }}
+      - uses: actions/download-artifact@v4
+        if: contains(github.event.inputs.service_deploy,'AWS')
+        with:
+          name: Terraform-Plan-AWS-${{ github.run_number }}-${{ vars.environment_stage }}
+          path: ${{ github.event.inputs.service_deploy }}
+###################################################
+########## TERRAFORM APPLY ########################
+###################################################
+      - name: Terraform Apply ${{ github.event.inputs.service_deploy }}.
+        if: contains(github.event.inputs.service_deploy,'AWS')
+        uses: ./.github/actions/terraform_custom
+        with:
+          aws-role: ${{ secrets.OIDC_PLATFORM_NONPROD }}
+          deploy-plan: "apply -auto-approve AWS-${{ github.run_number }}.plan"
+          service_deploy: ${{ github.event.inputs.service_deploy }}
+          runner_token: ${{ secrets.RUNNER_TOKEN }}
+          terraform_version: "1.13.4"
