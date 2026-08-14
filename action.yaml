@@ -1,0 +1,40 @@
+name: 'Terraform custom github actions'
+description: 'Custom composite action for Terraform build'
+inputs:
+  aws-role:  # id of input
+    description: 'Role to be used'
+    required: true
+  deploy-plan:  # id of input
+    description: 'apply -auto-approve | plan'
+    required: true
+  service_deploy:  # id of input
+    description: 'which service to deploy'
+    required: true
+  runner_token:  # id of input
+    description: 'token to be used'
+    required: true
+  terraform_version:  # id of input
+    description: 'Terraform version to be used'
+    default: "1.11.3"  
+runs:
+  using: "composite"
+  steps:
+    - name: configure aws credentials
+      uses: aws-actions/configure-aws-credentials@v3
+      with:
+        role-to-assume: ${{ inputs.aws-role }}
+        role-session-name: terraformdeploysession
+        aws-region: "eu-west-1"                   
+    - name:  Terraform ${{ inputs.deploy-plan }}.
+      run: |
+             cd ${{ inputs.service_deploy }}
+             git config --global url."https://${{ inputs.runner_token }}@github.com".insteadOf "https://github.com"
+             curl https://releases.hashicorp.com/terraform/${{ inputs.terraform_version }}/terraform_${{ inputs.terraform_version }}_linux_amd64.zip -O -J -L
+             unzip terraform_${{ inputs.terraform_version }}_linux_amd64.zip && rm terraform_${{ inputs.terraform_version }}_linux_amd64.zip
+             cat main.tf
+             chmod 777 -R *        
+             ./terraform init -upgrade
+             ./terraform validate
+             echo "## Terraform summary" >> $GITHUB_STEP_SUMMARY
+             ./terraform ${{ inputs.deploy-plan }} -no-color >> $GITHUB_STEP_SUMMARY
+      shell: bash
